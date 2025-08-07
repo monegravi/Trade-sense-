@@ -3,8 +3,8 @@
 Features:
 - 1h candlesticks (crypto via CCXT, gold via Yahoo Finance) with continuous refresh
 - Technical indicators, sentiment, macro features
-- Transformer models (Autoformer, PyTorch) with Optuna auto-tuning
-- Feature selection loop with SHAP/permutation importance
+- Sequence models: Autoformer + LightGBM baseline on flattened sequences, ensembling
+- Walk-forward CV, threshold optimization, SHAP feature importance
 - Anomaly detection, regime changes
 - Backtest with costs, TP/SL, ROI; paper trading
 - Telegram notifications; weekly/monthly prediction summaries
@@ -29,14 +29,17 @@ FRED_API_KEY=optional_fred_key
 python -m trading_bot.main --task run_daily
 ```
 
-### Structure
-- `trading_bot/data`: data ingestion and preprocessing
-- `trading_bot/features`: indicators and feature selection
-- `trading_bot/model`: models and training
-- `trading_bot/backtest`: backtesting and paper trading
-- `trading_bot/notify`: notifications (Telegram)
-- `trading_bot/utils`: logging, config
+### Docker
+Build and run:
+```
+docker build -t trading-bot .
+docker run --rm -e TELEGRAM_BOT_TOKEN=xxx -e TELEGRAM_CHAT_ID=yyy trading-bot
+```
+
+### CI
+- GitHub Actions workflow at `.github/workflows/ci.yml` installs deps and performs a basic import check.
 
 ### Notes
-- Autoformer requires sufficient history; use at least 1-2k hourly bars.
-- If some data sources or APIs are unavailable, components will fail gracefully and log warnings.
+- Autoformer uses last-step features from each sequence; LightGBM uses flattened sequences; predictions are ensembled.
+- Threshold for trade signals is optimized via walk-forward backtest on recent data.
+- Ensure enough history (>= 2000 1h bars) for stable training.

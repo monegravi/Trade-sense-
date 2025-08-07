@@ -12,10 +12,13 @@ from trading_bot.data.fetch_candles import fetch_asset_ohlcv
 from trading_bot.data.preprocess import build_feature_table
 from trading_bot.data.sentiment import fetch_news_sentiment
 from trading_bot.data.macro import fetch_fred_series
-from trading_bot.features.feature_selection import evaluate_top_indicators
+
 from trading_bot.model.train import train_model
-from trading_bot.model.autoformer_model import predict
+from trading_bot.model.autoformer_model import predict as predict_auto
+from trading_bot.model.lgbm_model import predict_lgbm
+from trading_bot.model.ensemble import ensemble_predictions
 from trading_bot.backtest.backtester import BacktestConfig, run_backtest
+from trading_bot.backtest.optimizer import optimize_threshold
 from trading_bot.notify.telegram import send_telegram_message
 from trading_bot.monitor.anomalies import detect_anomalies
 from trading_bot.monitor.regimes import detect_regimes
@@ -78,13 +81,24 @@ def train_and_backtest(db: DuckDBClient, cfg: dict, asset: dict) -> dict:
     horizon = int(cfg["model"]["horizon_hours"])
     target_col = f"future_return_{horizon}h"
 
-    model_art = train_model(data, target_col, cfg["model"])  # contains model, feature_cols
+    model_art = train_model(data, target_col, cfg["model"])  # contains models, feature_cols
 
-    # Rolling predictions for backtest window
+    # Predictions using ensemble
     feature_cols = model_art["feature_cols"]
-    X = data[feature_cols].values.astype(np.float32)
-    preds = predict(model_art["model"], X)
-    data["pred_return"] = preds
+    seq_len = int(model_art["seq_len"])
+    # Build rolling sequences for inference
+    X_seq = []
+    for i in range(seq_len, len(data)):
+        X_seq.append(data.iloc[i-seq_len:i][feature_cols].values.astype(np.float32))
+    X_seq = np.array(X_seq)
+
+    af_pred = predict_auto(model_art["af_model"]["model"], X_seq[:, -1, :])
+    lgb_pred = predict_lgbm(model_art["lgb_model"]["model"], X_seq)
+    ens = ensemble_predictions({"af": af_pred, "lgb": lgb_pred}, weights={"af": 0.4, "lgb": 0.6})
+
+    # align back to dataframe length
+    data["pred_return"] = np.nan
+    data.loc[data.index[seq_len:], "pred_return"] = ens
 
     # Anomaly and regime detection
     data = detect_anomalies(data)
@@ -101,13 +115,18 @@ def train_and_backtest(db: DuckDBClient, cfg: dict, asset: dict) -> dict:
     )
 
     # Persist predictions for analysis/weekly accuracy
-    preds_df = data[["ts", "pred_return"]].rename(columns={"pred_return": "predicted_return"})
+    preds_df = data[["ts", "pred_return"]].rename(columns={"pred_return": "predicted_return"}).dropna()
     try:
-        db.insert_predictions(asset["symbol"], preds_df, horizon_hours=horizon, meta={"model": "autoformer"})
+        db.insert_predictions(asset["symbol"], preds_df, horizon_hours=horizon, meta={"model": "ensemble_af_lgb"})
     except Exception:
         pass
 
-    equity, stats, trades = run_backtest(data[["ts", "close", "pred_return"]], "pred_return", bt_cfg)
+    # Optimize threshold
+    clean_bt_df = data[["ts", "close", "pred_return"]].dropna()
+    best_th = optimize_threshold(clean_bt_df.copy(), bt_cfg)
+    bt_cfg.signal_threshold = best_th.threshold
+
+    equity, stats, trades = run_backtest(clean_bt_df, "pred_return", bt_cfg)
 
     # Current recommendation
     last_row = data.iloc[-1]
