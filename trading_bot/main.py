@@ -253,9 +253,69 @@ def send_accuracy_summary(cfg_path: str | None = None) -> None:
     send_telegram_message("\n".join(lines))
 
 
+def run_realtime(cfg_path: str | None = None) -> None:
+    cfg = load_config(cfg_path)
+    ensure_dirs(cfg)
+    db = DuckDBClient(cfg["general"]["db_path"])
+    interval = int(cfg.get("paper_trading", {}).get("interval_seconds", 300))
+    horizon = int(cfg["model"]["horizon_hours"])
+
+    # In-memory cache for last timestamps to fetch incrementally
+    last_ts = {}
+
+    while True:
+        try:
+            for asset in cfg["assets"]:
+                # Incremental fetch
+                try:
+                    existing = db.read_ohlcv(asset["symbol"])
+                    since_ms = None
+                    since_ts = None
+                    if not existing.empty:
+                        since_ts = pd.to_datetime(existing["ts"].max())
+                        since_ms = int(pd.Timestamp(since_ts).timestamp() * 1000)
+                    new = fetch_asset_ohlcv(asset, since_ms=since_ms, since_ts=since_ts)
+                    if not new.empty:
+                        db.upsert_ohlcv(asset["symbol"], new)
+                except Exception as e:
+                    logger.warning(f"Realtime fetch error for {asset['symbol']}: {e}")
+
+                # Build features and predict
+                try:
+                    data = build_features(db, cfg, asset)
+                    if len(data) < max(400, int(cfg["model"].get("context_hours", 168)) + 10):
+                        continue
+                    target_col = f"future_return_{horizon}h"
+                    # Train online (simple approach: periodic re-train)
+                    model_art = train_model(data, target_col, cfg["model"]) 
+                    feature_cols = model_art["feature_cols"]
+                    seq_len = int(model_art["seq_len"])
+                    X_seq = data.iloc[-seq_len:][feature_cols].values.astype(np.float32)[None, ...]
+                    af_pred = predict_auto(model_art["af_model"]["model"], X_seq[:, -1, :])
+                    lgb_pred = predict_lgbm(model_art["lgb_model"]["model"], X_seq)
+                    pred = float(ensemble_predictions({"af": af_pred, "lgb": lgb_pred})[0])
+
+                    # Save prediction
+                    ts = pd.to_datetime(data.iloc[-1]["ts"]) 
+                    preds_df = pd.DataFrame([{ "ts": ts, "predicted_return": pred }])
+                    try:
+                        db.insert_predictions(asset["symbol"], preds_df, horizon_hours=horizon, meta={"mode":"realtime"})
+                    except Exception:
+                        pass
+
+                    # Notify
+                    msg = f"RT {asset['symbol']} ts={ts} pred={pred:.4f}"
+                    send_telegram_message(msg)
+                except Exception as e:
+                    logger.error(f"Realtime pipeline error for {asset['symbol']}: {e}")
+        except Exception as e:
+            logger.error(f"Realtime loop error: {e}")
+        time.sleep(interval)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--task", type=str, default="run_daily", choices=["run_daily","paper_trade","accuracy_summary"]) 
+    parser.add_argument("--task", type=str, default="run_daily", choices=["run_daily","paper_trade","accuracy_summary","realtime"]) 
     parser.add_argument("--config", type=str, default=None)
     args = parser.parse_args()
 
@@ -265,6 +325,8 @@ def main():
         run_paper_trading(args.config)
     elif args.task == "accuracy_summary":
         send_accuracy_summary(args.config)
+    elif args.task == "realtime":
+        run_realtime(args.config)
 
 
 if __name__ == "__main__":

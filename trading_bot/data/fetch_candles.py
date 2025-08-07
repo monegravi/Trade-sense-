@@ -48,8 +48,7 @@ def fetch_crypto_ohlcv(symbol: str, exchange_name: str, since_ms: Optional[int] 
     return df
 
 
-def fetch_gold_ohlcv_yf(ticker: str = "XAUUSD=X") -> pd.DataFrame:
-    # yfinance returns daily and higher; to approximate 1h, we can use 60m
+def fetch_gold_ohlcv_yf(ticker: str = "XAUUSD=X", since_ts: Optional[pd.Timestamp] = None) -> pd.DataFrame:
     hist = yf.Ticker(ticker).history(period="730d", interval="60m")
     if hist.empty:
         return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"]).astype(
@@ -59,12 +58,15 @@ def fetch_gold_ohlcv_yf(ticker: str = "XAUUSD=X") -> pd.DataFrame:
     hist = hist.reset_index()
     hist = hist.rename(columns={"Datetime": "ts", "Date": "ts"})
     hist["ts"] = _to_ts(hist["ts"]) 
-    return hist[["ts", "open", "high", "low", "close", "volume"]]
+    out = hist[["ts", "open", "high", "low", "close", "volume"]]
+    if since_ts is not None:
+        out = out[out["ts"] > since_ts]
+    return out
 
 
-def fetch_asset_ohlcv(asset_cfg: dict, since_ms: Optional[int] = None) -> pd.DataFrame:
+def fetch_asset_ohlcv(asset_cfg: dict, since_ms: Optional[int] = None, since_ts: Optional[pd.Timestamp] = None) -> pd.DataFrame:
     if asset_cfg.get("type") == "crypto":
         return fetch_crypto_ohlcv(asset_cfg["symbol"], asset_cfg.get("exchange", "binance"), since_ms=since_ms)
     else:
         ticker = asset_cfg.get("yfinance_ticker", "XAUUSD=X")
-        return fetch_gold_ohlcv_yf(ticker)
+        return fetch_gold_ohlcv_yf(ticker, since_ts=since_ts)
