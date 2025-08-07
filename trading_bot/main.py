@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
+import time
 
 from trading_bot.utils.config_loader import load_config
 from trading_bot.utils.logger import get_logger
@@ -19,6 +20,7 @@ from trading_bot.model.lgbm_model import predict_lgbm
 from trading_bot.model.ensemble import ensemble_predictions
 from trading_bot.backtest.backtester import BacktestConfig, run_backtest
 from trading_bot.backtest.optimizer import optimize_threshold
+from trading_bot.backtest.evaluate import compute_hit_rate
 from trading_bot.notify.telegram import send_telegram_message
 from trading_bot.monitor.anomalies import detect_anomalies
 from trading_bot.monitor.regimes import detect_regimes
@@ -52,7 +54,8 @@ def build_features(db: DuckDBClient, cfg: dict, asset: dict) -> pd.DataFrame:
         return ohlcv
 
     horizon = int(cfg["model"]["horizon_hours"])
-    data, target_col = build_feature_table(ohlcv, horizon)
+    target_type = cfg["model"].get("target_type", "return")
+    data, target_col = build_feature_table(ohlcv, horizon, target_type=target_type)
 
     # Sentiment (optional)
     if cfg["features"]["sentiment"]["enabled"]:
@@ -180,14 +183,88 @@ def run_daily(cfg_path: str | None = None) -> None:
     send_summary_telegram(summaries, cfg)
 
 
+def run_paper_trading(cfg_path: str | None = None) -> None:
+    cfg = load_config(cfg_path)
+    ensure_dirs(cfg)
+    db = DuckDBClient(cfg["general"]["db_path"])
+    interval = int(cfg.get("paper_trading", {}).get("interval_seconds", 300))
+
+    # Simple loop: refresh data -> build features -> load/train -> predict last -> update state
+    while True:
+        try:
+            refresh_data(db, cfg)
+            for asset in cfg["assets"]:
+                try:
+                    data = build_features(db, cfg, asset)
+                    if len(data) < 400:
+                        continue
+                    # Train or reuse (for demo, train each loop; could add model caching)
+                    horizon = int(cfg["model"]["horizon_hours"])
+                    target_col = f"future_return_{horizon}h"
+                    model_art = train_model(data, target_col, cfg["model"])  
+                    feature_cols = model_art["feature_cols"]
+                    seq_len = int(model_art["seq_len"])
+                    X_seq = data.iloc[-seq_len:][feature_cols].values.astype(np.float32)[None, ...]
+                    af_pred = predict_auto(model_art["af_model"]["model"], X_seq[:, -1, :])
+                    lgb_pred = predict_lgbm(model_art["lgb_model"]["model"], X_seq)
+                    pred = float(ensemble_predictions({"af": af_pred, "lgb": lgb_pred})[0])
+
+                    # Determine action
+                    bt_cfg = BacktestConfig(
+                        fee_bps=float(cfg["backtest"]["fee_bps"]),
+                        slippage_bps=float(cfg["backtest"]["slippage_bps"]),
+                        take_profit_pct=float(cfg["backtest"]["take_profit_pct"]),
+                        stop_loss_pct=float(cfg["backtest"]["stop_loss_pct"]),
+                        signal_threshold=float(cfg["backtest"]["signal_threshold"]),
+                        initial_cash=float(cfg["backtest"]["initial_cash"]),
+                    )
+                    signal = 1 if pred > bt_cfg.signal_threshold else (-1 if pred < -bt_cfg.signal_threshold else 0)
+
+                    # Update state in DB (append row)
+                    price = float(data.iloc[-1]["close"])
+                    ts = pd.to_datetime(data.iloc[-1]["ts"]) 
+                    state_df = pd.DataFrame([{ "ts": ts, "cash": bt_cfg.initial_cash, "position": signal, "entry_price": price if signal!=0 else None }])
+                    db.insert_paper_state(asset["symbol"], state_df)
+
+                    send_telegram_message(f"PaperTrade {asset['symbol']} | signal={signal} pred={pred:.4f} price={price:.2f}")
+                except Exception as e:
+                    logger.error(f"Paper trading error for {asset['symbol']}: {e}")
+        except Exception as e:
+            logger.error(f"Paper trading loop error: {e}")
+        time.sleep(interval)
+
+
+def send_accuracy_summary(cfg_path: str | None = None) -> None:
+    cfg = load_config(cfg_path)
+    db = DuckDBClient(cfg["general"]["db_path"])
+    horizon = int(cfg["model"]["horizon_hours"])
+    lines = ["Accuracy Summary:"]
+    for asset in cfg["assets"]:
+        preds = db.read_predictions(asset["symbol"], horizon)
+        ohlcv = db.read_ohlcv(asset["symbol"]).rename(columns={"ts":"ts"})
+        if preds.empty or ohlcv.empty:
+            continue
+        df = preds.merge(ohlcv[["ts","close"]], on="ts", how="inner").sort_values("ts")
+        df["future_return"] = df["close"].shift(-horizon) / df["close"] - 1.0
+        hr = compute_hit_rate(df.rename(columns={"predicted_return":"predicted_return", "future_return":"future_return"}))
+        last_w = hr["weekly_hit"].dropna().iloc[-1] if not hr["weekly_hit"].dropna().empty else None
+        last_m = hr["monthly_hit"].dropna().iloc[-1] if not hr["monthly_hit"].dropna().empty else None
+        lines.append(f"- {asset['symbol']}: weekly={last_w:.2% if last_w is not None else 'n/a'}, monthly={last_m:.2% if last_m is not None else 'n/a'}")
+    send_telegram_message("\n".join(lines))
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--task", type=str, default="run_daily", choices=["run_daily"]) 
+    parser.add_argument("--task", type=str, default="run_daily", choices=["run_daily","paper_trade","accuracy_summary"]) 
     parser.add_argument("--config", type=str, default=None)
     args = parser.parse_args()
 
     if args.task == "run_daily":
         run_daily(args.config)
+    elif args.task == "paper_trade":
+        run_paper_trading(args.config)
+    elif args.task == "accuracy_summary":
+        send_accuracy_summary(args.config)
 
 
 if __name__ == "__main__":

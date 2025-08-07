@@ -30,6 +30,7 @@ features:
 
 model:
   name: autoformer
+  target_type: log_return
   horizon_hours: 24
   context_hours: 336
   optuna_trials: 20
@@ -45,8 +46,11 @@ backtest:
   slippage_bps: 5      # 0.05%
   take_profit_pct: 0.02
   stop_loss_pct: 0.01
-  signal_threshold: 0.003  # required predicted return to open position
+  signal_threshold: 0.003  # initial; optimizer searches around this
   initial_cash: 10_000
+
+paper_trading:
+  interval_seconds: 300
 
 notifications:
   telegram:

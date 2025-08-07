@@ -63,6 +63,18 @@ class DuckDBClient:
             );
             """
         )
+        self.con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS paper_state (
+                asset TEXT,
+                ts TIMESTAMP,
+                cash DOUBLE,
+                position INTEGER,
+                entry_price DOUBLE,
+                PRIMARY KEY (asset, ts)
+            );
+            """
+        )
 
     def upsert_ohlcv(self, asset: str, df: pd.DataFrame) -> None:
         df = df.copy()
@@ -140,5 +152,16 @@ class DuckDBClient:
             """
             INSERT INTO trades
             SELECT asset, entry_ts, exit_ts, side, entry_price, exit_price, size, fee, pnl, meta FROM tmp_trades
+            """
+        )
+
+    def insert_paper_state(self, asset: str, state_df: pd.DataFrame) -> None:
+        state_df = state_df.copy()
+        state_df.insert(0, "asset", asset)
+        self.con.register("tmp_paper", state_df)
+        self.con.execute(
+            """
+            INSERT OR REPLACE INTO paper_state
+            SELECT asset, ts, cash, position, entry_price FROM tmp_paper
             """
         )
