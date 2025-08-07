@@ -100,9 +100,16 @@ def train_and_backtest(db: DuckDBClient, cfg: dict, asset: dict) -> dict:
     lgb_pred = predict_lgbm(model_art["lgb_model"]["model"], X_seq)
     ens = ensemble_predictions({"af": af_pred, "lgb": lgb_pred}, weights={"af": 0.4, "lgb": 0.6})
 
+    # Confidence series
+    returns = data["close"].pct_change().fillna(0)
+    from trading_bot.model.confidence import compute_confidence_series
+    conf_series = compute_confidence_series(af_pred, lgb_pred, ens, returns)
+
     # align back to dataframe length
     data["pred_return"] = np.nan
+    data["confidence"] = np.nan
     data.loc[data.index[seq_len:], "pred_return"] = ens
+    data.loc[data.index[seq_len:], "confidence"] = conf_series.values
 
     # Anomaly and regime detection
     data = detect_anomalies(data)
@@ -116,12 +123,13 @@ def train_and_backtest(db: DuckDBClient, cfg: dict, asset: dict) -> dict:
         stop_loss_pct=float(cfg["backtest"]["stop_loss_pct"]),
         signal_threshold=float(cfg["backtest"]["signal_threshold"]),
         initial_cash=float(cfg["backtest"]["initial_cash"]),
+        min_confidence=float(cfg["backtest"].get("min_confidence", 0.0)),
     )
 
     # Persist predictions for analysis/weekly accuracy
-    preds_df = data[["ts", "pred_return"]].rename(columns={"pred_return": "predicted_return"}).dropna()
+    preds_df = data[["ts", "pred_return", "confidence"]].rename(columns={"pred_return": "predicted_return"}).dropna()
     try:
-        db.insert_predictions(asset["symbol"], preds_df, horizon_hours=horizon, meta={"model": "ensemble_af_lgb"})
+        db.insert_predictions(asset["symbol"], preds_df[["ts","predicted_return"]], horizon_hours=horizon, meta={"model": "ensemble_af_lgb", "has_confidence": "1"})
     except Exception:
         pass
 
@@ -310,8 +318,8 @@ def run_realtime(cfg_path: str | None = None) -> None:
                         pass
 
                     # Notify
-                    msg = f"RT {asset['symbol']} ts={ts} pred={pred:.4f}"
-                    send_telegram_message(msg)
+                        msg = f"RT {asset['symbol']} ts={ts} pred={pred:.4f} conf={conf:.2f}"
+    send_telegram_message(msg)
                 except Exception as e:
                     logger.error(f"Realtime pipeline error for {asset['symbol']}: {e}")
         except Exception as e:

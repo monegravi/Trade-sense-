@@ -12,6 +12,7 @@ class BacktestConfig:
     stop_loss_pct: float
     signal_threshold: float
     initial_cash: float
+    min_confidence: float = 0.0
 
 
 def generate_signals(pred_returns: pd.Series, threshold: float) -> pd.Series:
@@ -23,6 +24,8 @@ def generate_signals(pred_returns: pd.Series, threshold: float) -> pd.Series:
 
 def run_backtest(df: pd.DataFrame, pred_col: str, cfg: BacktestConfig) -> Tuple[pd.DataFrame, dict, pd.DataFrame]:
     df = df.copy()
+    if "confidence" in df.columns and cfg.min_confidence > 0:
+        df = df[df["confidence"] >= cfg.min_confidence]
     df["signal"] = generate_signals(df[pred_col], cfg.signal_threshold)
 
     position = 0

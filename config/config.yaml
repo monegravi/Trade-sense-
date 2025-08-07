@@ -40,6 +40,7 @@ model:
   validation_ratio: 0.2
   test_ratio: 0.1
   early_stopping_patience: 5
+  retrain_interval_hours: 6
 
 backtest:
   fee_bps: 5           # 0.05%
@@ -48,6 +49,7 @@ backtest:
   stop_loss_pct: 0.01
   signal_threshold: 0.003  # initial; optimizer searches around this
   initial_cash: 10_000
+  min_confidence: 0.6
 
 paper_trading:
   interval_seconds: 300
