@@ -41,6 +41,14 @@ model:
   test_ratio: 0.1
   early_stopping_patience: 5
   retrain_interval_hours: 6
+  # Fixed historical split (use ISO dates if provided)
+  train_end_date: "2022-12-31"
+  eval_start_date: "2023-01-01"
+  drift_retrain:
+    enabled: true
+    hit_rate_window_days: 30
+    min_hit_rate: 0.55
+    cooldown_hours: 24
 
 backtest:
   fee_bps: 5           # 0.05%

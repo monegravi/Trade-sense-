@@ -15,6 +15,8 @@ from trading_bot.data.sentiment import fetch_news_sentiment
 from trading_bot.data.macro import fetch_fred_series
 
 from trading_bot.model.train import train_model
+from trading_bot.model.splits import split_by_dates
+from trading_bot.model.train_fixed import train_with_fixed_split
 from trading_bot.model.autoformer_model import predict as predict_auto
 from trading_bot.model.lgbm_model import predict_lgbm
 from trading_bot.model.ensemble import ensemble_predictions
@@ -85,7 +87,14 @@ def train_and_backtest(db: DuckDBClient, cfg: dict, asset: dict) -> dict:
     horizon = int(cfg["model"]["horizon_hours"])
     target_col = f"future_return_{horizon}h"
 
-    model_art = train_model(data, target_col, cfg["model"])  # contains models, feature_cols
+    # Fixed split training if configured
+    train_end = cfg["model"].get("train_end_date")
+    eval_start = cfg["model"].get("eval_start_date")
+    if train_end or eval_start:
+        train_df, eval_df = split_by_dates(data, train_end, eval_start)
+        model_art = train_with_fixed_split(train_df, eval_df, target_col, cfg["model"])  # contains models
+    else:
+        model_art = train_model(data, target_col, cfg["model"])  # contains models, feature_cols
 
     # Predictions using ensemble
     feature_cols = model_art["feature_cols"]
