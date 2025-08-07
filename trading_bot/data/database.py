@@ -43,10 +43,16 @@ class DuckDBClient:
                 horizon_hours INTEGER,
                 predicted_return DOUBLE,
                 meta MAP(TEXT, TEXT),
+                confidence DOUBLE,
                 PRIMARY KEY (asset, ts, horizon_hours)
             );
             """
         )
+        # In case existing DB lacks confidence column, try to add it
+        try:
+            self.con.execute("ALTER TABLE predictions ADD COLUMN confidence DOUBLE;")
+        except Exception:
+            pass
         self.con.execute(
             """
             CREATE TABLE IF NOT EXISTS trades (
@@ -127,22 +133,31 @@ class DuckDBClient:
         df = df.copy()
         df.insert(0, "asset", asset)
         df["horizon_hours"] = horizon_hours
-        df["meta"] = df.get("meta", None)
         if meta is not None:
-            df["meta"] = str(meta)
+            # Convert to map of text->text by casting values to str
+            df["meta"] = str({k: str(v) for k, v in meta.items()})
         self.con.execute("BEGIN TRANSACTION;")
         self.con.register("tmp_preds", df)
-        self.con.execute(
-            """
-            INSERT OR REPLACE INTO predictions
-            SELECT asset, ts, horizon_hours, predicted_return, meta FROM tmp_preds
-            """
-        )
+        # Try insert with confidence; fallback without
+        try:
+            self.con.execute(
+                """
+                INSERT OR REPLACE INTO predictions
+                SELECT asset, ts, horizon_hours, predicted_return, meta, confidence FROM tmp_preds
+                """
+            )
+        except Exception:
+            self.con.execute(
+                """
+                INSERT OR REPLACE INTO predictions
+                SELECT asset, ts, horizon_hours, predicted_return, meta, NULL as confidence FROM tmp_preds
+                """
+            )
         self.con.execute("COMMIT;")
 
     def read_predictions(self, asset: str, horizon_hours: int) -> pd.DataFrame:
         return self.con.execute(
-            "SELECT ts, predicted_return FROM predictions WHERE asset = ? AND horizon_hours = ? ORDER BY ts",
+            "SELECT ts, predicted_return, confidence FROM predictions WHERE asset = ? AND horizon_hours = ? ORDER BY ts",
             [asset, horizon_hours],
         ).df()
 

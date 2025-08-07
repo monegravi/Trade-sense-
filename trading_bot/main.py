@@ -23,7 +23,7 @@ from trading_bot.model.ensemble import ensemble_predictions
 from trading_bot.backtest.backtester import BacktestConfig, run_backtest
 from trading_bot.backtest.optimizer import optimize_threshold
 from trading_bot.backtest.precision import optimize_threshold_for_precision
-from trading_bot.backtest.evaluate import compute_hit_rate
+from trading_bot.backtest.evaluate import compute_hit_rate, confidence_hit_rate
 from trading_bot.notify.telegram import send_telegram_message
 from trading_bot.monitor.anomalies import detect_anomalies
 from trading_bot.monitor.regimes import detect_regimes
@@ -272,7 +272,13 @@ def send_accuracy_summary(cfg_path: str | None = None) -> None:
         hr = compute_hit_rate(df.rename(columns={"predicted_return":"predicted_return", "future_return":"future_return"}))
         last_w = hr["weekly_hit"].dropna().iloc[-1] if not hr["weekly_hit"].dropna().empty else None
         last_m = hr["monthly_hit"].dropna().iloc[-1] if not hr["monthly_hit"].dropna().empty else None
-        lines.append(f"- {asset['symbol']}: weekly={last_w:.2% if last_w is not None else 'n/a'}, monthly={last_m:.2% if last_m is not None else 'n/a'}")
+        conf_summary = confidence_hit_rate(df.rename(columns={"predicted_return":"predicted_return", "future_return":"future_return"}))
+        top_bucket = conf_summary.dropna().sort_values("hit_rate", ascending=False).head(1)
+        conf_msg = ""
+        if not top_bucket.empty:
+            b = top_bucket.iloc[0]
+            conf_msg = f" | best_conf_bucket={b['conf_bucket']}: hit={b['hit_rate']:.2%}, trades={int(b['trades'])}"
+        lines.append(f"- {asset['symbol']}: weekly={last_w:.2% if last_w is not None else 'n/a'}, monthly={last_m:.2% if last_m is not None else 'n/a'}{conf_msg}")
     send_telegram_message("\n".join(lines))
 
 
