@@ -309,17 +309,22 @@ def run_realtime(cfg_path: str | None = None) -> None:
                     lgb_pred = predict_lgbm(model_art["lgb_model"]["model"], X_seq)
                     pred = float(ensemble_predictions({"af": af_pred, "lgb": lgb_pred})[0])
 
+                    # Confidence
+                    from trading_bot.model.confidence import compute_confidence_single
+                    recent_returns = data["close"].pct_change().fillna(0)
+                    conf = compute_confidence_single(float(af_pred[0]), float(lgb_pred[0]), pred, recent_returns)
+
                     # Save prediction
                     ts = pd.to_datetime(data.iloc[-1]["ts"]) 
                     preds_df = pd.DataFrame([{ "ts": ts, "predicted_return": pred }])
                     try:
-                        db.insert_predictions(asset["symbol"], preds_df, horizon_hours=horizon, meta={"mode":"realtime"})
+                        db.insert_predictions(asset["symbol"], preds_df, horizon_hours=horizon, meta={"mode":"realtime", "confidence": f"{conf:.2f}"})
                     except Exception:
                         pass
 
                     # Notify
-                        msg = f"RT {asset['symbol']} ts={ts} pred={pred:.4f} conf={conf:.2f}"
-    send_telegram_message(msg)
+                    msg = f"RT {asset['symbol']} ts={ts} pred={pred:.4f} conf={conf:.2f}"
+                    send_telegram_message(msg)
                 except Exception as e:
                     logger.error(f"Realtime pipeline error for {asset['symbol']}: {e}")
         except Exception as e:
