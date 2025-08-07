@@ -20,6 +20,7 @@ from trading_bot.model.lgbm_model import predict_lgbm
 from trading_bot.model.ensemble import ensemble_predictions
 from trading_bot.backtest.backtester import BacktestConfig, run_backtest
 from trading_bot.backtest.optimizer import optimize_threshold
+from trading_bot.backtest.precision import optimize_threshold_for_precision
 from trading_bot.backtest.evaluate import compute_hit_rate
 from trading_bot.notify.telegram import send_telegram_message
 from trading_bot.monitor.anomalies import detect_anomalies
@@ -126,8 +127,13 @@ def train_and_backtest(db: DuckDBClient, cfg: dict, asset: dict) -> dict:
 
     # Optimize threshold
     clean_bt_df = data[["ts", "close", "pred_return"]].dropna()
-    best_th = optimize_threshold(clean_bt_df.copy(), bt_cfg)
-    bt_cfg.signal_threshold = best_th.threshold
+    # Optimize for precision first (target 70%), fallback to ROI-based optimizer
+    prec_opt = optimize_threshold_for_precision(clean_bt_df.copy(), horizon)
+    if prec_opt.precision >= 0.7:
+        bt_cfg.signal_threshold = prec_opt.threshold
+    else:
+        best_th = optimize_threshold(clean_bt_df.copy(), bt_cfg)
+        bt_cfg.signal_threshold = best_th.threshold
 
     equity, stats, trades = run_backtest(clean_bt_df, "pred_return", bt_cfg)
 
